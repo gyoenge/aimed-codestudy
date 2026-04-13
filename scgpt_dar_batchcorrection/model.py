@@ -323,7 +323,36 @@ class TransformerModel(nn.Module):
             Transformer output에서 cell-level embedding 하나를 뽑는 함수. 
             즉: token-level embedding들 --> cell embedding 1개 
         """
-        pass 
+        if self.cell_emb_style == "cls":
+            # 첫 번째 token (CLS) 을 cell 대표로 사용하는 방식 
+            # 장점: Transformer가 학습 과정에서 CLS token에 모든 정보를 모으도록 학습됨. 
+            # 단점: CLS token 학습이 잘 안되면 성능이 떨어질 수 있음. 
+            # CLS = 이 cell 전체를 요약한 토큰 
+            cell_emb = layer_output[:, 0, :] # (batch, d_model)
+        elif self.cell_emb_style == "avg-pool":
+            # 평균 pooling 방식
+            # 모든 gene embedding의 평균. 
+            # 장점: 매우 안정적, CLS token 필요 없음. 
+            # 단점: 중요한 gene / 덜 중요한 gene 구분 못함. 모든 gene을 똑같이 취급. 
+            cell_emb = torch.mean(layer_output, dim=1)
+        elif self.cell_emb_style == "w-pool": 
+            # gene 마다 중요도를 다르게 줘서 weighted sum 
+            # weights: (batch, seq_len). 의미: 각 gene의 중요도. 
+            if weights is None: 
+                raise ValueError("weights is required when cell_emb_style is w-pool")
+            if weights.dim() != 2: 
+                raise ValueError("weights should be 2D")
+            cell_emb = torch.sum(layer_output * weights.unsqueeze(2), dim=1) # (batch, seq_len) → (batch, seq_len, 1). broadcasting 가능하도록. 
+            cell_emb = F.normalize(cell_emb, p=2, dim=1) # (batch, d_model) # embedding scale 통일. contrastive learning 에서 중요. L2 normalization. 
+
+        """
+        이 cell embedding을 사용해: 
+        → CLS decoder (classification)
+        → MVC decoder (GEPC)
+        → ECS (contrastive)
+        → DAB (DAR)
+        """
+        return cell_emb  
 
     def _check_batch_labels(self, 
         batch_labels: Tensor # batch/domain label tensor 
