@@ -28,3 +28,45 @@ from .dsbn import DomainSpecificBatchNorm1d
 from .grad_reverse import grad_reverse 
 
 
+class TransformerModel(nn.Module):
+    def __init__(
+        self, 
+        # Transformer model architecture 
+        ntoken: int, # gene token 개수 (vocab size)
+        d_model: int, # embedding dimension (Transformer hidden size) (cell_emb dimension = d_model)
+        nhead: int, # multi-head attention head 수 
+        d_hid: int, # feed-forward layer hidden dimension (FFN: d_model → d_hid → d_model)
+        nlayers: int, # Transformer encoder layer 개수
+        # Classification/CLS 관련 
+        nlayers_cls: int=3, # CLS head (classifier)의 layer 수
+        n_cls: int=1, # classification output dimension 
+        # 입력 관련 
+        vocab: Any=None, # gene token mapping 
+        dropout: float=0.5, # (dropout -> regularization)
+        pad_token: str="<pad>", # padding token 이름 
+        pad_value: int=0, # padding 값 (expression 값 쪽)
+        # 학습 Objectives 관련 - MVC, DAB, DSBN 
+        do_mvc: bool=False, # GEPC 활성화 여부 (cell_emb → gene expression 예측)
+        do_dab: bool=False, # Batch Correction - DAR 활성화 (grad_reverse + discriminator 활성화)
+        use_batch_labels: bool=False, # batch label 사용 (batch embedding 추가할지 여부) (사용되면: embedding + batch embedding concat)
+        num_batch_labels: Optional[int]=None, # batch label 사용 (batch 개수)
+        domain_spec_batchnorm: Union[bool, str]=False, # Batch Correction - DSBN 활성화 (입력 분포 정리 (low-level))
+        # 입력 embedding 방식 (continuous: 실수값>MLP, category: binning후 embed, scaling: gene embedding * value)
+        input_emb_style: str="continuous", 
+        n_input_bins: Optional[int]=None, # category 방식일 때 bin. ㅐ수 
+        # Cell embedding 방식 
+        cell_emb_style: str="cls", # (cls: 첫 token 사용, avg-pool: 평균 pooling, w-pool: weighted pooling)
+        # GEPC (MVC) 관련 
+        mvc_decoder_style: str="inner product", # (inner product: dot product 방식, concat: concat 후 MLP, sum: 합 기반) (대부분 inner product --> 효율 + 성능)
+        # ECS (contrastive) 관련 
+        ecs_threshold: float=0.3, # embedding similarity threshold (의미: cosine similarity > threshold → positive)
+        # Zero modeling 
+        explicit_zero_prob: bool=False, # gene expression이 0일 확률을 따로 모델링 (이유: scRNA → zero inflation problem. True이면 value + zero_prob 둘 다 예측.)
+        # Others 
+        use_fast_transformer: bool=False, # FlashAttention 등 사용 여부 (flash: FlashAttention, linear: linear attention)
+        fast_transformer_backend: str="flash", 
+        pre_norm: bool=False, # normalization 방식 (pre-norm, post-norm) (pre-norm → 안정적 (deep 모델), post-norm → original Transformer)
+    ): 
+        super().__init__()
+        pass 
+
