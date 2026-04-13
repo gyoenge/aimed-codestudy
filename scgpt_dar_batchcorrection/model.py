@@ -362,7 +362,13 @@ class TransformerModel(nn.Module):
             왜 필요하냐: 예를 들어: use_batch_labels=True 또는 DSBN=True인데 batch_labels=None이면 문제. 
                         반대로 batch 기능 안 쓰는데 batch_labels를 넣어도 이상함. 
         """
-        pass 
+        if self.use_batch_labels or self.domain_spec_batchnorm: 
+            assert batch_labels is not None 
+        elif batch_labels is not None: 
+            raise ValueError(
+                "batch_labels should only be provided when `self.use_batch_labels`"
+                " or `self.domain_spec_batchnorm` is True"
+            )
 
     def generate(
         self, 
