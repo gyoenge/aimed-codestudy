@@ -251,7 +251,6 @@ class TransformerModel(nn.Module):
         # weight 초기화. 앞에서 만든 모듈들의 일부 weight 초기화. 예를 들어 gene embedding weight를 uniform 초기화. 
         self.init_weights() 
 
-
     def init_weights(self) -> None: 
         """
             모델의 일부 파라미터를 초기화하는 함수
@@ -259,7 +258,10 @@ class TransformerModel(nn.Module):
             신경망은 초기값에 따라 학습 안정성이 달라질 수 있음. 
             특히 embedding layer는 직접 초기화하는 경우가 많음. 
         """
-        pass 
+        initrange = 0.1 
+        # TODO: check if this initialization is helpful and shall we apply to all? 
+        self.encoder.embedding.weight.data.uniform_(-initrange, initrange) 
+        # gene embedding weight를 [-0.1, 0.1] 범위의 균등분포로 초기화
 
     def _encode(
         self, 
