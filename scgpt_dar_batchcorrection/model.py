@@ -70,3 +70,101 @@ class TransformerModel(nn.Module):
         super().__init__()
         pass 
 
+    def init_weights(self) -> None: 
+        """
+            모델의 일부 파라미터를 초기화하는 함수
+            보통 embedding weight나 linear layer weight를 특정 범위로 초기화할 때 사용
+            신경망은 초기값에 따라 학습 안정성이 달라질 수 있음. 
+            특히 embedding layer는 직접 초기화하는 경우가 많음. 
+        """
+        pass 
+
+    def _encode(
+        self, 
+        src: Tensor, # gene token id. (batch, seq_len)
+        values: Tensor, # 각 gene에 해당하는 expression 값. (batch, seq_len)
+        src_key_padding_mask: Tensor, # padding 위치를 표시하는 mask. (batch, seq_len). 보통 True면 padding. 
+        batch_labels: Optional[Tensor] = None, # 각 샘플의 batch/domain label. (batch,). DSBN 또는 batch embedding 할 때 필요.  
+    ) -> Tensor: # 반환: (batch, seq_len, d_model). 즉: Transformer encoder output. token별 representation을 반환한다. 
+        """
+            입력 gene token + value를 Transformer에 넣기 전처리하고 encoder를 통과시키는 함수
+            즉, 모델의 핵심 인코딩 단계  
+        """
+        pass 
+
+    def _get_cell_emb_from_layer(
+        self, 
+        layer_output: Tensor, # Transformer encoder의 출력. (batch, seq_len, d_model)
+        weights: Tensor=None, # weighted pooling할 때 사용하는 가중치 (batch, seq_len). cell_emb_style == "w-pool"일 때만 필요. 
+    ) -> Tensor: # 반환: (batch, d_model). 즉: 샘플 하나당 하나의 cell embedding. 
+        """
+            Transformer output에서 cell-level embedding 하나를 뽑는 함수. 
+            즉: token-level embedding들 --> cell embedding 1개 
+        """
+        pass 
+
+    def _check_batch_labels(self, 
+        batch_labels: Tensor # batch/domain label tensor 
+    ) -> None: # 반환값 없음. 잘못되면 assert 또는 ValueError 
+        """
+            역할: 현재 설정에서 batch_labels가 필요한지/불필요한지 검사하는 함수. 
+            왜 필요하냐: 예를 들어: use_batch_labels=True 또는 DSBN=True인데 batch_labels=None이면 문제. 
+                        반대로 batch 기능 안 쓰는데 batch_labels를 넣어도 이상함. 
+        """
+        pass 
+
+    def generate(
+        self, 
+        cell_emb: Tensor, # cell-level embedding. (batch, d_model). 
+        src: Tensor, # gene token ids. (batch, seq_len). 
+        values: Optional[Tensor]=None, # gene expression value 입력. 없을 수도 있음. 
+        src_key_padding_mask: Optional[Tensor]=None, # padding mask. 없으면 내부에서 전부 non-padding으로 처리할 수도 있음. 
+        gen_iters: int=1, # generation iteration 횟수. interation generation 확장용 인자. 
+        batch_labels: Optional[Tensor]=None, # batch label. DSBN/batch embedding 필요 시 사용. (batch, )
+    ) -> Tensor: # 반환: (batch, seg_len). gene 별 예측 expression 값. 
+        """
+            역할: 주어진 cell embedding을 바탕으로 gene expression을 생성/예측 
+            논문에서 말하는 generation 쪽과 연결되는 함수. 
+        """
+        pass 
+
+    def forward(
+        self, 
+        src: Tensor, # gene token ids. (batch, seq_len)
+        values: Tensor, # gene expression values. (batch, seq_len)
+        src_key_padding_mask: Tensor, # padding mask. (batch, seq_len)
+        batch_labels: Optional[Tensor]=None, # batch/domain labels. (batch,)
+        # objective 관련 boolean 옵션 
+        CLS: bool=False, # cell type classification head 사용할지 여부 
+        CCE: bool=False, # contrastive cell embedding objective 사용할지 여부 
+        MVC: bool=False, # GEPC/MVC decoder 사용할지 여부 
+        ECS: bool=False, # elastic cell similarity loss 계산할지 여부 
+        do_sample: bool=False, # zero probability가 있을 때 실제 sampling할지 여부 
+    ) -> Mapping[str, Tensor]: # 반환: dictionary 형태. 
+        """
+            역할: 모델의 메인 forward 함수. 
+            어떤 objective를 켤지 옵션으로 받아서 필요한 output들을 dictionary로 반환. 
+            학습 시 가장 많이 쓰이는 핵심 함수. 
+            여러 head/output을 한 번에 관리. 
+        """
+        pass 
+
+    def encode_batch(
+        self, 
+        srd: Tensor, # 전체 gene token ids. (N, seq_len)
+        values: Tensor, # 전체 expression values. (N, seq_len)
+        src_key_padding_mask: Tensor, # 전체 padding mask. (N, seq_len)
+        batch_size: int, # 한 번에 몇 개씩 encode 할지. 
+        batch_labels: Optional[Tensor]=None, # 전체 batch labels. (N,)
+        output_to_cpu: bool=True, # 결과를 CPU로 옮길지. 큰 embedding 추출할 때 GPU 메모리 절약용. 
+        time_step: Optional[int]=None, # 특정 token 위치의 output만 뽑을지. 예: 0이면 CLS token만 추출 가능. 
+        return_np: bool=False, # 결과를 numpy array로 반환할지 여부 
+    ) -> Tensor: # (N, seq_len, d_model). 또는 time_step 지정 시 (N, d_model).
+        """
+            역할: 큰 데이터셋을 batch 단위로 나눠서 인코딩하는 함수 
+            inference/embedding 추출용. 
+            즉: 전체 데이터 --> 여러 mini-batch로 쪼개서 _encode 실행 --> 결과 합치기 
+        """
+        pass 
+
+
