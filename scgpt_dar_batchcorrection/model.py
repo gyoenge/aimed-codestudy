@@ -69,23 +69,27 @@ class TransformerModel(nn.Module):
     ): 
         super().__init__()
         
+        # 기본 설정 저장 
         self.model_type = "Transformer"
-        self.d_model = d_model 
-        self.do_dab = do_dab
+        self.d_model = d_model # hidden size 
+        self.do_dab = do_dab # DAR 사용 여부 
         self.ecs_threshold = ecs_threshold
         self.use_batch_labels = use_batch_labels
         self.domain_spec_batchnorm = domain_spec_batchnorm
-        self.input_emb_style = input_emb_style
-        self.cell_emb_style = cell_emb_style
+        self.input_emb_style = input_emb_style 
+        self.cell_emb_style = cell_emb_style 
         self.explicit_zero_prob = explicit_zero_prob
         self.norm_scheme = "pre" if pre_norm else "post"
+        # value embedding 방식 (입력 설정 검증)
         if self.input_emb_style not in ["category", "continuous", "scaling"]:
             raise ValueError(
                 f"input_emb_style should be one of category, continuous, scaling, "
                 f"got {input_emb_style}"
             )
+        # cell embedding 추출 방식 (입력 설정 검증)
         if cell_emb_style not in ["cls", "avg-pool", "w-pool"]:
             raise ValueError(f"Unknown cell_emb_style: {cell_emb_style}")
+        # fast transformer 입력 설정 검증 (flash attention 사용 가능 여부 확인)
         if use_fast_transformer:
             if not flash_attn_available: 
                 warnings.warn(
@@ -97,6 +101,9 @@ class TransformerModel(nn.Module):
         self.use_fast_transformer = use_fast_transformer
 
         # TODO: add dropout in the GeneEncoder 
+        # GeneEncoder: gene token id를 embedidng vector로 바꾸는 모듈 
+        # 입력 (batch, seq_len) -> 출력 (batch, seq_len, d_model)
+        # NLP에서 word embedding에 해당. gene 이름을 벡터로 바꾸는 단계 
         self.encoder = GeneEncoder(
             ntoken, 
             d_model, 
@@ -104,12 +111,16 @@ class TransformerModel(nn.Module):
         )
 
         # Value Encoder, NOTE: the scaling style is also handled in _encode method 
+        # ValueEncoder: expression value를 embedding space로 옮김. 
         if input_emb_style == "continuous":
+            # 실수값을 MLP로 projection. scRNA expression 같은 연속값 처리. 
             self.value_encoder = ContinuousValueEncoder(
                 d_model, 
                 dropout, 
             )
         elif input_emb_style == "category":
+            # 값을 binning한 뒤 embedding lookup
+            # discrete category처럼 취급 
             assert n_input_bins > 0 
             self.value_encoder = CategoryValueEncoder(
                 n_input_bins, 
@@ -117,32 +128,45 @@ class TransformerModel(nn.Module):
                 padding_idx=pad_value,
             )
         else: 
+            # scaling: 별도 encoder 없이 Identity 
+            # 나중에 _encode()에서 gene embedding과 곱함. 
+            # 즉 이 부분은: gene token embedding + value embedding을 만들기 위한 준비. 
             self.value_encoder = nn.Identity()  
             # nn.Softmax(dim=1)
             # TODO: consider row-wise normalization or softmax
             # TODO: Correct handle the mask_value when using scaling 
 
         # Batch Encoder 
+        # 역할: batch label도 embedding으로 바꾸는 모듈. 
+        # batch 정보를 모델이 명시적으로 참고하게 할 수 있음. 
+        # batch 정보를 decoder 쪽에 concat할 때 사용 가능. 예를 들어 expr/mvc decoder. 
         if use_batch_labels:
             self.batch_encoder = BatchLabelEncoder(
                 num_batch_labels, 
                 d_model, 
             )
         
-        # DSBN or BN 
+        # DSBN or 일반 BN 설정 
+        # 역할: Transformer에 들어가기 전 embedding 분포를 정리. 
         if domain_spec_batchnorm is True or domain_spec_batchnorm == "dsbn":
+            # DSBN: batch마다 다른 BN 사용. low-level batch correction. 
             use_affine = True if domain_spec_batchnorm == "do_affine" else False
             print(f"Use domain specific batchnorm with affine={use_affine}")
             self.dsbn = DomainSpecificBatchNorm1d(
                 d_model, num_batch_labels, eps=6.1e-5, affine=use_affine, 
             )
         elif domain_spec_batchnorm == "batchnorm":
+            # 일반 BN: 모든 batch에 공통 BN. 
             print("Using simple batchnorm instead of domain specific batchnorm")
             self.bn = nn.BatchNorm1d(d_model, eps=6.1e-5)
+        # 아무 것도 안쓰면 normalization 생략. 
 
+        # Transformer Encoder 생성. 
+        # 역할: 모델의 backbone. 이 부분이 실제로 gene들 사이 관계를 학습하는 핵심 블록. 
         # Fast/Flash/Normal Transformer setting 
         if use_fast_transformer: 
             if fast_transformer_backend == "linear":
+                # linear fast attention 기반. 
                 self.transformer_encoder = FastTransformerEncoderWrapper(
                     d_model, 
                     nhead, 
@@ -151,6 +175,7 @@ class TransformerModel(nn.Module):
                     dropout, 
                 )
             elif fast_transformer_backend == "flash":
+                # FlashAttention 기반 
                 encoder_layers = FlashTransformerEncoderLayer(
                     d_model, 
                     nhead, 
@@ -164,6 +189,7 @@ class TransformerModel(nn.Module):
                     nlayers, 
                 )
         else: 
+            # PyTorch 기본 TransformerEncoderLayer 
             encoder_layers = TransformerEncoderLayer(
                 d_model, 
                 nhead, 
@@ -177,19 +203,25 @@ class TransformerModel(nn.Module):
             )
 
         # Expr Decoder setting 
+        # 역할: Transformer output으로부터 gene expression 예측. 
+        # 논문 기준으로 GEP/MLM 쪽 decoder 
         self.decoder = ExprDecoder(
             d_model, 
-            explicit_zero_prob=explicit_zero_prob,
-            use_batch_labels=use_batch_labels, 
+            explicit_zero_prob=explicit_zero_prob, # 값뿐 아니라 "0일 확률"도 같이 예측. 
+            use_batch_labels=use_batch_labels, # batch embedding을 concat해서 decoder에 넣음. 
         )
 
-        # CLS Decoder setting 
+        # CLS Decoder setting
+        # 역할: cell embedding --> class logits. cell type classification 같은 task용.  
         self.cls_decoder = ClsDecoder(
             d_model, n_cls, 
             nlayers=nlayers_cls, 
         )
 
         # MVC Decoder setting 
+        # 역할: GEPC/MVC objective 용 decoder. 
+        # cell embedding 기반으로 gene expression을 다시 맞추는 head. 
+        # cell_emb 가 진짜 biological state를 잘 담도록 강제. 
         if do_mvc: 
             self.mvc_decoder = MVCDecoder(
                 d_model, 
@@ -199,6 +231,11 @@ class TransformerModel(nn.Module):
             )
 
         # DAB setting 
+        # DAB / DAR discriminator 생성 
+        # 역할: DAR의 핵심. cell embedding으로 batch label을 예측하는 discriminator. 
+        # 내부에서 x = grad_reverse(x)를 거쳐서 encoder 쪽 gradient를 뒤집는다. 
+        # 결과적으로, discriminator는 batch를 맞추려고 하고 encoder는 batch를 못 맞추게 만드는 방향으로 학습이 된다. 
+        # 즉: batch-invariant representation을 만들게 된다. 
         if do_dab: 
             self.grad_reverse_discriminator = AdversarialDiscriminator(
                 d_model, 
@@ -206,9 +243,12 @@ class TransformerModel(nn.Module):
                 reverse_grad=True, 
             )
 
+        # Similarity: cosine similarity / temperature scaling. contrastive objective 계산용. 
         self.sim = Similarity(temp=0.5) # TODO: auto set temp 
+        # CCE Loss 계산용 cross entropy. 즉 CCE/ECS 류 objective를 위해 미리 준비. 
         self.creterion_cce = nn.CrossEntropyLoss()
 
+        # weight 초기화. 앞에서 만든 모듈들의 일부 weight 초기화. 예를 들어 gene embedding weight를 uniform 초기화. 
         self.init_weights() 
 
 
