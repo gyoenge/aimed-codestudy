@@ -68,7 +68,149 @@ class TransformerModel(nn.Module):
         pre_norm: bool=False, # normalization 방식 (pre-norm, post-norm) (pre-norm → 안정적 (deep 모델), post-norm → original Transformer)
     ): 
         super().__init__()
-        pass 
+        
+        self.model_type = "Transformer"
+        self.d_model = d_model 
+        self.do_dab = do_dab
+        self.ecs_threshold = ecs_threshold
+        self.use_batch_labels = use_batch_labels
+        self.domain_spec_batchnorm = domain_spec_batchnorm
+        self.input_emb_style = input_emb_style
+        self.cell_emb_style = cell_emb_style
+        self.explicit_zero_prob = explicit_zero_prob
+        self.norm_scheme = "pre" if pre_norm else "post"
+        if self.input_emb_style not in ["category", "continuous", "scaling"]:
+            raise ValueError(
+                f"input_emb_style should be one of category, continuous, scaling, "
+                f"got {input_emb_style}"
+            )
+        if cell_emb_style not in ["cls", "avg-pool", "w-pool"]:
+            raise ValueError(f"Unknown cell_emb_style: {cell_emb_style}")
+        if use_fast_transformer:
+            if not flash_attn_available: 
+                warnings.warn(
+                    "flash-attn is not installed, using pytorch transformer instead. "
+                    "Set use_fast_transformer=False to avoid this warning. "
+                    "Installing flash-attn is highly recommended."
+                )
+                use_fast_transformer = False
+        self.use_fast_transformer = use_fast_transformer
+
+        # TODO: add dropout in the GeneEncoder 
+        self.encoder = GeneEncoder(
+            ntoken, 
+            d_model, 
+            padding_idx=vocab[pad_token], 
+        )
+
+        # Value Encoder, NOTE: the scaling style is also handled in _encode method 
+        if input_emb_style == "continuous":
+            self.value_encoder = ContinuousValueEncoder(
+                d_model, 
+                dropout, 
+            )
+        elif input_emb_style == "category":
+            assert n_input_bins > 0 
+            self.value_encoder = CategoryValueEncoder(
+                n_input_bins, 
+                d_model, 
+                padding_idx=pad_value,
+            )
+        else: 
+            self.value_encoder = nn.Identity()  
+            # nn.Softmax(dim=1)
+            # TODO: consider row-wise normalization or softmax
+            # TODO: Correct handle the mask_value when using scaling 
+
+        # Batch Encoder 
+        if use_batch_labels:
+            self.batch_encoder = BatchLabelEncoder(
+                num_batch_labels, 
+                d_model, 
+            )
+        
+        # DSBN or BN 
+        if domain_spec_batchnorm is True or domain_spec_batchnorm == "dsbn":
+            use_affine = True if domain_spec_batchnorm == "do_affine" else False
+            print(f"Use domain specific batchnorm with affine={use_affine}")
+            self.dsbn = DomainSpecificBatchNorm1d(
+                d_model, num_batch_labels, eps=6.1e-5, affine=use_affine, 
+            )
+        elif domain_spec_batchnorm == "batchnorm":
+            print("Using simple batchnorm instead of domain specific batchnorm")
+            self.bn = nn.BatchNorm1d(d_model, eps=6.1e-5)
+
+        # Fast/Flash/Normal Transformer setting 
+        if use_fast_transformer: 
+            if fast_transformer_backend == "linear":
+                self.transformer_encoder = FastTransformerEncoderWrapper(
+                    d_model, 
+                    nhead, 
+                    d_hid, 
+                    nlayers, 
+                    dropout, 
+                )
+            elif fast_transformer_backend == "flash":
+                encoder_layers = FlashTransformerEncoderLayer(
+                    d_model, 
+                    nhead, 
+                    d_hid, 
+                    dropout, 
+                    batch_first=True, 
+                    norm_scheme=self.norm_scheme, 
+                )
+                self.transformer_encoder = TransformerEncoder(
+                    encoder_layers, 
+                    nlayers, 
+                )
+        else: 
+            encoder_layers = TransformerEncoderLayer(
+                d_model, 
+                nhead, 
+                d_hid, 
+                dropout,
+                batch_first=True, 
+            )
+            self.transformer_encoder = TransformerEncoder(
+                encoder_layers, 
+                nlayers, 
+            )
+
+        # Expr Decoder setting 
+        self.decoder = ExprDecoder(
+            d_model, 
+            explicit_zero_prob=explicit_zero_prob,
+            use_batch_labels=use_batch_labels, 
+        )
+
+        # CLS Decoder setting 
+        self.cls_decoder = ClsDecoder(
+            d_model, n_cls, 
+            nlayers=nlayers_cls, 
+        )
+
+        # MVC Decoder setting 
+        if do_mvc: 
+            self.mvc_decoder = MVCDecoder(
+                d_model, 
+                arch_style=mvc_decoder_style,
+                explicit_zero_prob=explicit_zero_prob, 
+                use_batch_labels=use_batch_labels, 
+            )
+
+        # DAB setting 
+        if do_dab: 
+            self.grad_reverse_discriminator = AdversarialDiscriminator(
+                d_model, 
+                n_cls=num_batch_labels, 
+                reverse_grad=True, 
+            )
+
+        self.sim = Similarity(temp=0.5) # TODO: auto set temp 
+        self.creterion_cce = nn.CrossEntropyLoss()
+
+        self.init_weights() 
+
 
     def init_weights(self) -> None: 
         """
@@ -168,3 +310,42 @@ class TransformerModel(nn.Module):
         pass 
 
 
+### Sub Modules ### 
+
+class FastTransformerEncoderWrapper(nn.Module):
+    pass
+
+class FlashTransformerEncoderLayer(nn.Module):
+    pass
+
+class GeneEncoder(nn.Module):
+    pass 
+
+class PositionalEncoding(nn.Module):
+    pass 
+
+class ContinuousValueEncoder(nn.Module):
+    pass 
+
+class CategoryValueEncoder(nn.Module):
+    pass
+
+class BatchLabelEncoder(nn.Module):
+    pass 
+
+class Similarity(nn.Module):
+    pass 
+
+class ExprDecoder(nn.Module):
+    pass 
+
+class ClsDecoder(nn.Module):
+    pass 
+
+class MVCDecoder(nn.Module):
+    pass 
+
+class AdversarialDiscriminator(nn.Module):
+    pass 
+
+### 
