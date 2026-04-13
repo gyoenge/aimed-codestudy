@@ -274,7 +274,45 @@ class TransformerModel(nn.Module):
             입력 gene token + value를 Transformer에 넣기 전처리하고 encoder를 통과시키는 함수
             즉, 모델의 핵심 인코딩 단계  
         """
-        pass 
+        self._check_batch_labels(batch_labels)
+
+        # gene encoding 
+        src = self.encoder(src) # (batch, seq_len, d_model)
+        self.cur_gene_token_embs = src 
+        
+        # value encoding 
+        values = self.value_encoder(values) # (batch, seq_len, d_model)
+        
+        # gene embedding(src)과 value embedding(values)을 어떻게 결합하느냐를 결정
+        # : expression 값을 embedding에 어떻게 반영할 것인가. 
+        if self.input_emb_style == "scaling":
+            values = values.unsqueeze(2)
+            total_embs = src * values 
+            # gene embedding을 "크기(scale)"로 조절 
+        else: 
+            total_embs = src + values
+            # gene 정보 + expression 정보 더하기. 
+            # gene identity + expression 정보를 독립적으로 유지. 더 expressive 함. 
+
+        # batch normalization 
+        if getattr(self, "dsbn", None) is not None:
+            batch_label = int(batch_labels[0].item())
+            total_embs = self.dsbn(
+                total_embs.permute(0, 2, 1), 
+                batch_label, 
+            ).permute(0, 2, 1)
+            # the batch norm always works on dim 1 
+        elif getattr(self, "bn", None) is not None: 
+            total_embs = self.bn(total_embs.permute(0, 2, 1)).permute(0, 2, 1)
+
+        # transformer encoding 
+        # 앞에서 만든 total_embs가 여기서 문맥(context)을 학습한 representation으로 변환
+        # gene embedding + value 정보를 Transformer에 넣어서 gene 간 관계를 학습하는 단계
+        output = self.transformer_encoder(
+            total_embs, # 각 gene token이 이미 value까지 반영된 embedding 상태
+            src_key_padding_mask=src_key_padding_mask, # padding token은 attention에서 제외하는 마스크. 
+        )
+        return output # (batch, seq_len, d_model )
 
     def _get_cell_emb_from_layer(
         self, 
