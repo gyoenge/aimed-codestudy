@@ -728,6 +728,42 @@ class MVCDecoder(nn.Module):
     pass 
 
 class AdversarialDiscriminator(nn.Module):
-    pass 
+    """
+    Discriminator for the adversarial training for batch correction. 
+        DAR/DAB에서 batch를 예측하는 discriminator. 
+        겉으로는 그냥 MLP classifier인데, grad_reverse가 붙으면 adversarial training용이 된다는 게 핵심. 
+        cell embedding을 입력으로 받아, 이 embedding이 어느 batch/domain에서 왔는지 예측하는 분류기. 
+        입력은 보통 cell_emb이고, 출력은 batch logits. 
+    """ 
+
+    def __init__(
+        self, 
+        d_model: int, # 입력 임베딩 차원 = cell_emb 크기 
+        n_cls: int, # 예측할 클래스 수 = batch 개수 
+        nlayers: int=3, # discriminator의 깊이 
+        activation: callable=nn.LeakyReLU, 
+        reverse_grad: bool=False, # True면 grad_reverse()를 적용해서 DAR, False면 그냥 일반 classifier. 
+    ): 
+        super().__init__()
+        # module list 
+        self._decoder = nn.ModuleList()
+        for i in range(nlayers - 1):
+            self._decoder.append(nn.Linear(d_model, d_model))
+            self._decoder.append(activation())
+            self._decoder.append(nn.LayerNorm(d_model))
+        self.out_layer = nn.Linear(d_model, n_cls)
+        self.reverse_grad = reverse_grad
+
+    def forward(self, 
+        x: Tensor # (batch_size, embsize)
+    ) -> Tensor: 
+        if self.reverse_grad:
+            # gradient reversal 적용: forward에서는 x가 그대로 통과함. backward에서는 gradient가 -1배 되어 encoder로 전달됨. 
+            # 첫 x에 적용한다. 
+            x = grad_reverse(x, lambd=1.0)
+        # 나머지는 classifier 기본 구조. 
+        for layer in self._decoder:
+            x = layer(x)
+        return self.out_layer(x)
 
 ### 
