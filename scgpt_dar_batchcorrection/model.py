@@ -504,9 +504,176 @@ class TransformerModel(nn.Module):
             학습 시 가장 많이 쓰이는 핵심 함수. 
             여러 head/output을 한 번에 관리. 
         """
-        pass 
+        # gene token + value → Transformer → contextual embedding
+        # 각 gene이 다른 gene들과의 관계를 반영한 상태
+        transformer_output = self._encode(
+            src, 
+            values, 
+            src_key_padding_mask, 
+            batch_labels, 
+        ) 
+        # batch embedding (optional) (나중에 decoder에 붙여서 batch-aware prediction 가능)
+        if self.use_batch_labels:
+            batch_emb = self.batch_encoder(batch_labels) # (batch, d_model)
 
-    def encode_batch(
+        # 여러 objective 결과를 담을 container
+        output = {}
+        
+        ### MLM(GEP) output ### 
+        mlm_output = self.decoder(
+            transformer_output # (i) batch label 없이 
+            if not self.use_batch_labels
+            else torch.cat( # batch label 포함 
+                [
+                    transformer_output,
+                    batch_emb.unsqueeze(1).repeat(1, transformer_output.shape[1], 1),
+                ],
+                dim=2,
+            ),
+            """
+            (batch, seq_len, d_model) + (batch, seq_len, d_model)
+                → (batch, seq_len, 2*d_model) 
+            gene representation + batch 정보. 
+            """
+            # else transformer_output + batch_emb.unsqueeze(1),
+        )
+        # zero_probs (optional) (해당 gene이 0일 확률 고려)
+        if self.explicit_zero_prob and do_sample: 
+            # sampling --> 0일 확률로 마스킹 (예: prob=0.8 → 80% 확률로 0)
+            # 결과적으로 실제 scRNA-like sparse 데이터 생성
+            bernoulli = Bernoulli(probs=mlm_output["zero_probs"])
+            output["mlm_output"] = bernoulli.sample() * mlm_output["pred"]
+        else: 
+            # 아니라면 그냥 예측값 사용. 
+            output["mlm_output"] = mlm_output["pred"] # (batch, seq_len)
+        if self.explicit_zero_prob:
+            output["mlm_zero_probs"] =mlm_output["zero_probs"]
+
+        # cell embedding 생성. 
+        cell_emb = self._get_cell_emb_from_layer(transformer_output, values)
+        output["cell_emb"] = cell_emb 
+
+        ### CLS output ### 
+        if CLS: 
+            output["cls_output"] = self.cls_decoder(cell_emb) # (batch, n_cls)
+
+        ### CCE output ### 
+        # Contranstive Cell Embedding: 같은 입력을 두 번 인코딩해서 나온 두 cell embedding은 가깝게, 다른 샘플의 embedding은 멀게 학습하는 것. 
+        # cell embedding이 더 안정적이고 구분력 있게 되도록 contrastive loss를 건다. 
+        if CCE: 
+            # 같은 cell의 두 표현 cell1, cell2 → positive pair
+            cell1 = cell_emb
+            transformer_output2 = self._encode(
+                src, values, src_key_padding_mask, batch_labels
+            )
+            cell2 = self._get_cell_emb_from_layer(transformer_output2) # 같은 입력을 한 번 더 encoder에 넣어서 새로운 embedding을 만든다. 
+            # 왜 두 번 하냐면, dropout 같은 stochastic 요소 때문에 완전히 같은 값은 아니고 약간 다른 view가 생기기 때문이다. 
+
+            # distributed training일 때 all_gather: 
+            # 멀티 GPU 학습이면 각 GPU가 자기 mini-batch만 갖고 있으니까, negative sample 수가 적어진다. 
+            # 그래서 모든 GPU의 embedding을 모아서 contrastive loss를 더 강하게 계산하려는 것. 
+            # gather embeddings from all devices if distributed training
+            if dist.is_initialized() and self.training:
+                # 예를 들어 GPU가 4개면 [cell_gpu0, cell_gpu1, cell_gpu2, cell_gpu3]를 담을 공간을 만든다. 
+                cls1_list = [
+                    torch.zeros_like(cell1) for _ in range(dist.get_world_size())
+                ]
+                cls2_list = [
+                    torch.zeros_like(cell2) for _ in range(dist.get_world_size())
+                ]
+                # 각 GPU의 cell1, cell2를 전부 모아서 리스트에 채운다.
+                dist.all_gather(tensor_list=cls1_list, tensor=cell1.contiguous())
+                dist.all_gather(tensor_list=cls2_list, tensor=cell2.contiguous())
+
+                # NOTE: all_gather results have no gradients, so replace the item
+                # of the current rank with the original tensor to keep gradients.
+                # See https://github.com/princeton-nlp/SimCSE/blob/main/simcse/models.py#L186
+                cls1_list[dist.get_rank()] = cell1
+                cls2_list[dist.get_rank()] = cell2
+                # all_gather로 모은 tensor들은 gradient가 안 이어지기 때문에, 현재 GPU의 자기 tensor만 원래 tensor로 다시 바꿔서 gradient를 살리는 것. 
+
+                # concat하면 (global_batch, d_model) 
+                cell1 = torch.cat(cls1_list, dim=0)
+                cell2 = torch.cat(cls2_list, dim=0)
+            
+            # TODO: should detach the secon run cls2? can have a try.
+            # cosine similarity matrix: 
+            # cos_sim[i, j]는 cell1[i] 와 cell2[j] 의 similarity
+            # 같은 샘플의 두 view가 positive pair니까: cos_sim[i, i] 가 정답. 즉 diagonal이 가장 커야 한다. 
+            cos_sim = self.sim(cell1.unsqueeze(1), cell2.unsqueeze(0)) # (batch, batch)
+            # labels 생성. 의미는 i번째 cell1은 i번째 cell2와 짝이다는 것. 
+            labels = torch.arange(cos_sim.size(0)).long().to(cell1.device)
+            # cross entropy로 contrastive loss 계산
+            output["loss_cce"] = self.creterion_cce(cos_sim, labels)
+
+        ### MVC output ### 
+        # GEPC/MVC : Masked Value Prediction at Cell level.
+        # cell embedding 하나로 전체 gene expression을 다시 예측하는 global objective
+        # cell_emb → gene expression을 예측해서 cell embedding이 전체 cell 상태를 잘 담도록 강제하는 과정. 
+        if MVC: 
+            mvc_output = self.mvc_decoder( # cell embedding이 각 gene을 얼마나 "활성화"하는지 계산
+                cell_emb # (i) cell 전체 상태를 담은 벡터를 입력으로 
+                if not self.use_batch_labels
+                else torch.cat([cell_emb, batch_emb], dim=1),
+                # else cell_emb + batch_emb, 
+                self.cur_gene_token_embs, # (ii) gene token embedding (각 gene의 identity 정보)
+            )
+            # zero prob 고려 (optional)
+            if self.explicit_zero_prob and do_sample:
+                bernoulli = Bernoulli(probs=mvc_output["zero_probs"])
+                output["mvc_output"] = bernoulli.sample() * mvc_output["pred"]
+            else:
+                output["mvc_output"] = mvc_output["pred"]  # (batch, seq_len)
+            if self.explicit_zero_prob:
+                output["mvc_zero_probs"] = mvc_output["zero_probs"]
+
+        ### ECS output ### 
+        # Elastic Cell Similarity loss
+        # cell embedding들 간의 “적당한 유사도 구조”를 만들도록 하는 regularization
+        # cell embedding들이 너무 멀지도, 너무 가깝지도 않게 “적절한 유사도(=threshold)”를 가지도록 만드는 loss 
+        if ECS: 
+            # Here using customized cosine similarity instead of F.cosine_similarity
+            # to avoid the pytorch issue of similarity larger than 1.0, pytorch # 78064
+            # normalize the embedding
+            cell_emb_normed = F.normalize(cell_emb, p=2, dim=1) # 각 embedding을 unit vector로 만듦. 이유: cosine similarity = dot product로 계산 가능. 
+            cos_sim = torch.mm(cell_emb_normed, cell_emb_normed.t()) # (batch, batch)
+
+            # mask out diagonal elements
+            mask = torch.eye(cos_sim.size(0)).bool().to(cos_sim.device)
+            cos_sim = cos_sim.masked_fill(mask, 0.0)
+            """
+            cos_sim[i,j] = cell_i와 cell_j의 유사도
+            diagnoal 제거: 
+            자기 자신과의 유사도 = 1 → 항상 최대값 → 학습 방해
+            따라서 제거: self-similarity 무시 
+            """
+            # only optimize positive similarities 
+            cos_sim = F.relu(cos_sim) # positive similarity만 사용 (cos_sim < 0 → 0으로 제거)
+            """
+            ECS는 "멀어지게"가 아니라 → "적절히 가까워지게"가 목적
+            sim이 너무 크면: (sim - τ)^2 ↑ → loss ↓ --> penalty
+            sim이 너무 작으면: (sim - τ)^2 ↑ → loss ↓ --> penalty 
+            핵심 의미: 너무 가깝지도 말고, 너무 멀지도 말고, 적당히 가까워라.
+            contrastive랑 다름에 주의. ECS는 모든 cell 간 관계를 "부드럽게 정렬". 
+            즉, representation space를 smooth하게 만듦. 
+            """ 
+            output["loss_ecs"] = torch.mean(1 - (cos_sim - self.ecs_threshold) ** 2)
+
+        ### DAB/DAG setting ### 
+        # batch effect 제거의 핵심 메커니즘. 
+        # cell embedding에서 batch를 맞추는 classifier를 붙이고, gradient를 뒤집어서 batch 정보를 제거한다. 
+        if self.do_dab: 
+            """
+            encoder → cell_emb → grad_reverse → discriminator
+            학습방향: 
+                discriminator: batch 잘 맞추려고 함. 
+                encoder: gradient 뒤집힘 → batch 못 맞추게 만들려고 함. 
+            """
+            output["dab_output"] = self.grad_reverse_discriminator(cell_emb)
+
+        return output 
+    
+    def encode_batch( 
         self, 
         srd: Tensor, # 전체 gene token ids. (N, seq_len)
         values: Tensor, # 전체 expression values. (N, seq_len)
