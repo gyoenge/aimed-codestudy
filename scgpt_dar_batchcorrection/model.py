@@ -382,8 +382,108 @@ class TransformerModel(nn.Module):
         """
             역할: 주어진 cell embedding을 바탕으로 gene expression을 생성/예측 
             논문에서 말하는 generation 쪽과 연결되는 함수. 
+            단순 forward랑 달리, cell-level 정보를 입력으로 넣어 token-level을 복원하는 흐름이 핵심. 
+            cell_emb를 CLS 자리에 넣고 Transformer를 돌려서 gene expression을 생성한다. 
         """
-        pass 
+
+        # TODO: should have a tag indicate the generation mode 
+        # TODO: if gen_iters > 1, should have a tag indicate the current iteration 
+
+        # batch_labels 체크 
+        try: 
+            self._check_batch_labels(batch_labels)
+        except:
+            import warnings
+            warnings.warn(
+                "batch_labels is required but not provided, using zeros instead"
+            ) 
+            # batch 정보 없으면 그냥 0번 domain으로 처리
+            batch_labels = torch.zeros(
+                cell_emb.shape[0], 
+                dtype=torch.long, 
+                device=cell_emb.device
+            )
+
+        ### _encode ###   
+
+        # gene embedding (gene id → embedding vector)
+        src = self.encoder(src) # (batch, seq_len, d_model)
+
+        # value embedding 결합
+        if values is not None: 
+            values = self.value_encoder(values) # (batch, seq_len, d_model)
+            if self.input_emb_style == "scaling":
+                values = values.unsqueeze(2)
+                total_embs = src * values # scaling 
+            else:
+                total_embs = src + values # addition 
+        else:
+            total_embs = src # no values, use just gene info 
+
+        # DSBN or BN 
+        if getattr(self, "dsbn", None) is not None:
+            batch_label = int(batch_labels[0].item())
+            total_embs = self.dsbn(total_embs.permute(0, 2, 1), batch_label).permute(
+                0, 2, 1
+            )  # the batch norm always works on dim 1
+        elif getattr(self, "bn", None) is not None:
+            total_embs = self.bn(total_embs.permute(0, 2, 1)).permute(0, 2, 1)
+
+        # (i) cell_emb를 CLS 자리에 넣고 ** (중요)
+        """
+            원래 forward에서는: CLS token → cell_emb를 "추출"
+            하지만 generate에서는 반대로: cell_emb → CLS 위치에 "주입"
+            의미: cell embedding을 조건으로 Transformer가 gene을 생성. 
+        """
+        total_embs[:, 0, :] = cell_emb
+
+        # (ii) Transformer를 돌려서 
+        if src_key_padding_mask is None:
+            src_key_padding_mask = torch.zeros(
+                total_embs.shape[:2], dtype=torch.bool, device=total_embs.device
+            ) # mask 처리: padding 없으면 그냥 전부 valid 처리
+        transformer_output = self.transformer_encoder(
+            total_embs, src_key_padding_mask=src_key_padding_mask
+        )
+        """
+            의미: 
+            CLS (cell_emb) + gene embeddings
+            → 서로 attention
+            → gene-level representation 생성
+            핵심: 
+            cell_emb → 모든 gene에 영향 줌.    
+        """
+
+        ### ### ### 
+
+        # batch embedding 추가 (optional). 
+        # decoder가 batch-aware prediction 가능. 
+        if self.use_batch_labels: 
+            batch_emb = self.batch_encoder(batch_labels) # (batch, d_model)
+
+        # (iii) gene expression을 생성한다
+        # embedding → gene expression 값 예측. 
+        mlm_output = self.decoder(
+            transformer_output
+            if not self.use_batch_labels
+            else torch.cat(
+                [
+                    transformer_output, 
+                    batch_emb.unsqueeze(1).repeat(1, transformer_output.shape[1], 1), 
+                ],
+                dim=2, 
+            ), 
+            # else transformer_output + batch_emb.unsquuze(1), 
+        )
+        output = mlm_output["pred"]
+        """
+            왜 가능하냐: 
+            bidirectional attention 구조이기 때문에, 
+            CLS → gene 영향과 gene → CLS 영향이 둘 다 가능. 
+            conditional generation, 즉, p(gene expression | cell embedding). 
+        """
+
+        return output # (batch, seq_len)
 
     def forward(
         self, 
