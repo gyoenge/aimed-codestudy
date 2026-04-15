@@ -1,6 +1,6 @@
-# 📚 aimed-codestudy
+# 📚 AI-MED Lab Internship Code Study
 
-Code studies conducted during my undergraduate internship at the AI-MED Lab.
+**Code studies** conducted **during my undergraduate internship at the AI-MED Lab**.
 
 ### Overview
 
