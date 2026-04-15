@@ -14,8 +14,9 @@ The main goal of this repository is:
 
 All codes in this repository follow a consistent philosophy:
 
-- The code is directly based on official implementations or papers
-- I manually re-implemented or adapted them Added detailed comments to understand: architecture design and training logic. 
+- The code is directly based on official implementations or papers.
+- I typed out and studied the code from the original implementation. 
+- I added detailed comments to understand architecture design and training logic. 
 
 ---
 
